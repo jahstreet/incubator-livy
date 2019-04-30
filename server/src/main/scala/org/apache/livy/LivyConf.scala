@@ -254,6 +254,12 @@ object LivyConf {
   val KUBERNETES_INGRESS_TLS_SECRET_NAME =
     Entry("livy.server.kubernetes.ingress.tls.secretName", "spark-cluster-tls")
 
+  val KUBERNETES_GRAFANA_LOKI_ENABLED = Entry("livy.server.kubernetes.grafana.loki.enabled", false)
+  val KUBERNETES_GRAFANA_URL = Entry("livy.server.kubernetes.grafana.url", "http://localhost:3000")
+  val KUBERNETES_GRAFANA_LOKI_DATASOURCE =
+    Entry("livy.server.kubernetes.grafana.loki.datasource", "loki")
+  val KUBERNETES_GRAFANA_TIME_RANGE = Entry("livy.server.kubernetes.grafana.timeRange", "6h")
+
   // Whether session timeout should be checked, by default it will be checked, which means inactive
   // session will be stopped after "livy.server.session.timeout"
   val SESSION_TIMEOUT_CHECK = Entry("livy.server.session.timeout-check", true)
