@@ -102,7 +102,13 @@ class SparkProcessBuilder(livyConf: LivyConf) extends Logging {
 
   def driverCores(driverCores: String): SparkProcessBuilder = {
     if (livyConf.isRunningOnKubernetes()) {
-      conf("spark.kubernetes.driver.limit.cores", driverCores)
+      val coresNumber = {
+        val cores = driverCores.toDouble.floor.toInt
+        if (cores < 0) "1"
+        else cores.toString
+      }
+      conf("spark.driver.cores", coresNumber)
+      conf("spark.kubernetes.driver.request.cores", coresNumber)
     } else {
       conf("spark.driver.cores", driverCores)
     }
@@ -114,8 +120,8 @@ class SparkProcessBuilder(livyConf: LivyConf) extends Logging {
 
   def executorCores(executorCores: String): SparkProcessBuilder = {
     if (livyConf.isRunningOnKubernetes()) {
+      conf("spark.executor.cores", executorCores.toDouble.ceil.toInt.toString)
       conf("spark.kubernetes.executor.request.cores", executorCores)
-      conf("spark.kubernetes.executor.limit.cores", executorCores)
     } else {
       conf("spark.executor.cores", executorCores)
     }

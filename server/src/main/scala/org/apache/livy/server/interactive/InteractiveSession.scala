@@ -92,13 +92,16 @@ object InteractiveSession extends Logging {
         "spark.app.name" -> request.name.map(_.toString)
       ) ++ {
         if (livyConf.isRunningOnKubernetes()) {
+          val driverCores = {
+            val cores = request.driverCores.map(_.toDouble.floor.toInt)
+            if (cores.isDefined && cores.get < 0) Some("1")
+            else cores.map(_.toString)
+          }
           Map(
-            "spark.executor.cores" -> request.executorCores.map(_.toString),
+            "spark.executor.cores" -> request.executorCores.map(_.toDouble.ceil.toInt.toString),
             "spark.kubernetes.executor.request.cores" -> request.executorCores.map(_.toString),
-            "spark.kubernetes.executor.limit.cores" -> request.executorCores.map(_.toString),
-            "spark.driver.cores" -> request.driverCores.map(_.toString),
-            "spark.kubernetes.driver.request.cores" -> request.driverCores.map(_.toString),
-            "spark.kubernetes.driver.limit.cores" -> request.driverCores.map(_.toString)
+            "spark.driver.cores" -> driverCores,
+            "spark.kubernetes.driver.request.cores" -> driverCores
           )
         } else {
           Map(
