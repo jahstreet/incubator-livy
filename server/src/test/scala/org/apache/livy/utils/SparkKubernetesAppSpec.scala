@@ -28,18 +28,18 @@ import org.mockito.Mockito.{atLeast, verify, when}
 import org.mockito.invocation.InvocationOnMock
 import org.mockito.stubbing.Answer
 import org.scalatest.FunSpec
-import org.scalatest.mock.MockitoSugar.mock
+import org.scalatestplus.mockito.MockitoSugar._
 
 import org.apache.livy.{LivyBaseUnitTestSuite, LivyConf}
 import org.apache.livy.utils.SparkApp.State
 
 class SparkKubernetesAppSpec extends FunSpec with LivyBaseUnitTestSuite {
 
-  private def cleanupThread(t: Thread)(f: => Unit) = {
+  private def cleanupThread(t: Thread)(f: => Unit): Unit = {
     try { f } finally { t.interrupt() }
   }
 
-  private def mockSleep(ms: Long) = {
+  private def mockSleep(ms: Long): Unit = {
     Thread.`yield`()
   }
 
@@ -106,11 +106,13 @@ class SparkKubernetesAppSpec extends FunSpec with LivyBaseUnitTestSuite {
     it("should return application state") {
       val status = when(mock[PodStatus].getPhase).thenReturn("Status").getMock[PodStatus]
       val driver = when(mock[Pod].getStatus).thenReturn(status).getMock[Pod]
+      val livyConf = new LivyConf(false)
       assertResult("status") {
-        KubernetesAppReport(Some(driver), Seq.empty, IndexedSeq.empty).getApplicationState
+        KubernetesAppReport(Some(driver), Seq.empty, IndexedSeq.empty, None, livyConf)
+          .getApplicationState
       }
       assertResult("unknown") {
-        KubernetesAppReport(None, Seq.empty, IndexedSeq.empty).getApplicationState
+        KubernetesAppReport(None, Seq.empty, IndexedSeq.empty, None, livyConf).getApplicationState
       }
     }
   }

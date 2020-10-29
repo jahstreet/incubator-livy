@@ -19,8 +19,8 @@ package org.apache.livy.server
 
 import java.io.{BufferedInputStream, InputStream}
 import java.net.InetAddress
-import java.util.concurrent._
 import java.util.EnumSet
+import java.util.concurrent._
 import javax.servlet._
 
 import scala.collection.JavaConverters._

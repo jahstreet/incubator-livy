@@ -17,6 +17,8 @@
 
 package org.apache.livy.utils
 
+import java.net.URLEncoder
+import java.util.Collections
 import java.util.concurrent.TimeoutException
 
 import scala.annotation.tailrec
@@ -27,8 +29,10 @@ import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
-import io.fabric8.kubernetes.api.model.Pod
+import io.fabric8.kubernetes.api.model.{HasMetadata, OwnerReferenceBuilder, Pod, Service, ServiceBuilder}
+import io.fabric8.kubernetes.api.model.extensions.{Ingress, IngressBuilder}
 import io.fabric8.kubernetes.client._
+import org.apache.commons.lang.StringUtils
 
 import org.apache.livy.{LivyConf, Logging, Utils}
 
@@ -61,9 +65,11 @@ object SparkKubernetesApp extends Logging {
                       warn(s"Leaked app with tag ${leakedApp.getKey} haven't been killed")
                     }
                   )
-                case None if (leakedApp.getValue - now) > sessionLeakageCheckTimeout =>
-                  leakedApps.remove()
+                case None =>
                   warn(s"Leaked app with tag ${leakedApp.getKey} doesn't exist")
+                  if (now - leakedApp.getValue > sessionLeakageCheckTimeout) {
+                    leakedApps.remove()
+                  }
               }
             }
           } catch {
@@ -129,6 +135,10 @@ object SparkKubernetesApp extends Logging {
     val SUCCEEDED = "succeeded"
     val FAILED = "failed"
   }
+
+  private def buildHistoryServerUiUrl(livyConf: LivyConf, appId: String): String = {
+    s"${livyConf.get(LivyConf.UI_HISTORY_SERVER_URL)}/history/$appId/jobs/"
+  }
 }
 
 class SparkKubernetesApp private[utils](
@@ -170,11 +180,26 @@ class SparkKubernetesApp private[utils](
         Thread.currentThread().setName(s"kubernetesAppMonitorThread-$appTag")
         listener.foreach(_.appIdKnown(appId))
 
+        if (livyConf.getBoolean(LivyConf.KUBERNETES_INGRESS_CREATE)) {
+          withRetry(kubernetesClient.createSparkUIIngress(app, livyConf))
+        }
+
+        var appInfo = AppInfo()
         while (isRunning) {
           val appReport = withRetry(kubernetesClient.getApplicationReport(app, cacheLogSize))
           kubernetesAppLog = appReport.getApplicationLog
           kubernetesDiagnostics = appReport.getApplicationDiagnostics
           changeState(mapKubernetesState(appReport.getApplicationState, appTag))
+
+          val latestAppInfo = AppInfo(
+            appReport.getDriverLogUrl,
+            appReport.getTrackingUrl,
+            appReport.getExecutorsLogUrls
+          )
+          if (appInfo != latestAppInfo) {
+            listener.foreach(_.infoChanged(latestAppInfo))
+            appInfo = latestAppInfo
+          }
 
           Clock.sleep(pollInterval.toMillis)
         }
@@ -189,6 +214,9 @@ class SparkKubernetesApp private[utils](
           kubernetesDiagnostics = ArrayBuffer(e.getMessage)
           changeState(SparkApp.State.FAILED)
       } finally {
+        listener.foreach(_.infoChanged(AppInfo(sparkUiUrl = Option(buildHistoryServerUiUrl(
+          livyConf, Try(appPromise.future.value.get.get.getApplicationId).getOrElse("unknown")
+        )))))
         info(s"Finished monitoring application $appTag with state $state")
       }
     }
@@ -269,9 +297,12 @@ object KubernetesConstants {
   val SPARK_APP_TAG_LABEL = "spark-app-tag"
   val SPARK_ROLE_LABEL = "spark-role"
   val SPARK_EXEC_ID_LABEL = "spark-exec-id"
+  val SPARK_UI_URL_LABEL = "spark-ui-url"
 
   val SPARK_ROLE_DRIVER = "driver"
   val SPARK_ROLE_EXECUTOR = "executor"
+
+  val CREATED_BY_LIVY_LABEL = Map("created-by" -> "livy")
 }
 
 class KubernetesApplication(driverPod: Pod) {
@@ -294,13 +325,71 @@ class KubernetesApplication(driverPod: Pod) {
 private[utils] case class KubernetesAppReport(
     driver: Option[Pod],
     executors: Seq[Pod],
-    appLog: IndexedSeq[String]) {
+    appLog: IndexedSeq[String],
+    ingress: Option[Ingress],
+    livyConf: LivyConf) {
+
+  import KubernetesConstants._
+
+  private val grafanaUrl = livyConf.get(LivyConf.KUBERNETES_GRAFANA_URL)
+  private val timeRange = livyConf.get(LivyConf.KUBERNETES_GRAFANA_TIME_RANGE)
+  private val lokiDatasource = livyConf.get(LivyConf.KUBERNETES_GRAFANA_LOKI_DATASOURCE)
+  private val sparkAppTagLogLabel = SPARK_APP_TAG_LABEL.replaceAll("-", "_")
+  private val sparkRoleLogLabel = SPARK_ROLE_LABEL.replaceAll("-", "_")
+  private val sparkExecIdLogLabel = SPARK_EXEC_ID_LABEL.replaceAll("-", "_")
 
   def getApplicationState: String = {
     driver.map(_.getStatus.getPhase.toLowerCase).getOrElse("unknown")
   }
 
   def getApplicationLog: IndexedSeq[String] = appLog
+
+  def getDriverLogUrl: Option[String] = {
+    if (livyConf.getBoolean(LivyConf.KUBERNETES_GRAFANA_LOKI_ENABLED)) {
+      val appTag = driver.map(_.getMetadata.getLabels.get(SPARK_APP_TAG_LABEL))
+      if (appTag.isDefined && appTag.get != null) {
+        return Some(
+          s"""$grafanaUrl/explore?left=""" + URLEncoder.encode(
+            s"""["now-$timeRange","now","$lokiDatasource",""" +
+              s"""{"expr":"{$sparkAppTagLogLabel=\\"${appTag.get}\\",""" +
+              s"""$sparkRoleLogLabel=\\"$SPARK_ROLE_DRIVER\\"}"},""" +
+              s"""{"ui":[true,true,true,"exact"]}]""", "UTF-8")
+        )
+      }
+    }
+    None
+  }
+
+  def getExecutorsLogUrls: Option[String] = {
+    if (livyConf.getBoolean(LivyConf.KUBERNETES_GRAFANA_LOKI_ENABLED)) {
+      val urls = executors.map(_.getMetadata.getLabels).flatMap(labels => {
+        val sparkAppTag = labels.get(SPARK_APP_TAG_LABEL)
+        val sparkExecId = labels.get(SPARK_EXEC_ID_LABEL)
+        if (sparkAppTag != null && sparkExecId != null) {
+          val sparkRole = labels.getOrDefault(SPARK_ROLE_LABEL, SPARK_ROLE_EXECUTOR)
+          Some(s"executor-$sparkExecId#$grafanaUrl/explore?left=" + URLEncoder.encode(
+            s"""["now-$timeRange","now","$lokiDatasource",""" +
+              s"""{"expr":"{$sparkAppTagLogLabel=\\"$sparkAppTag\\",""" +
+              s"""$sparkRoleLogLabel=\\"$sparkRole\\",""" +
+              s"""$sparkExecIdLogLabel=\\"$sparkExecId\\"}"},""" +
+              s"""{"ui":[true,true,true,"exact"]}]""", "UTF-8"))
+        } else {
+          None
+        }
+      })
+      if (urls.nonEmpty) return Some(urls.mkString(";"))
+    }
+    None
+  }
+
+  def getTrackingUrl: Option[String] = {
+    val host = ingress.flatMap(i => Try(i.getSpec.getRules.get(0).getHost).toOption)
+    val path = driver
+      .map(_.getMetadata.getLabels.getOrDefault(SPARK_APP_TAG_LABEL, "unknown"))
+    val protocol = livyConf.get(LivyConf.KUBERNETES_INGRESS_PROTOCOL)
+    if (host.isDefined && path.isDefined) Some(s"$protocol://${host.get}/${path.get}")
+    else None
+  }
 
   def getApplicationDiagnostics: IndexedSeq[String] = {
     (Seq(driver) ++ executors.sortBy(_.getMetadata.getName).map(Some(_)))
@@ -345,16 +434,32 @@ private[utils] case class KubernetesAppReport(
 }
 
 private[utils] class LivyKubernetesClient(
-    client: DefaultKubernetesClient, namespaces: Set[String] = Set.empty) {
+    client: DefaultKubernetesClient, livyConf: LivyConf) {
 
   import KubernetesConstants._
   import scala.collection.JavaConverters._
+
+  private val NAMESPACES: Set[String] = livyConf.getKubernetesNamespaces()
+
+  private val NGINX_CONFIG_SNIPPET: String =
+    """
+      |proxy_set_header Accept-Encoding "";
+      |sub_filter_last_modified off;
+      |sub_filter '<head>' '<head> <base href="/%s/">';
+      |sub_filter 'href="/' 'href="';
+      |sub_filter 'src="/' 'src="';
+      |sub_filter "/api/v1/applications" "/%s/api/v1/applications";
+      |sub_filter '"/static/" + templateName + "-template.html"' '"/%s/static/" + templateName + "-template.html"';
+      |sub_filter 'document.baseURI.split' 'document.URL.split';
+      |sub_filter_once off;
+      |sub_filter_types text/html text/css text/javascript application/javascript;
+      """.stripMargin
 
   def getApplications(
       labels: Map[String, String] = Map(SPARK_ROLE_LABEL -> SPARK_ROLE_DRIVER),
       appTagLabel: String = SPARK_APP_TAG_LABEL,
       appIdLabel: String = SPARK_APP_ID_LABEL): Seq[KubernetesApplication] = {
-    Option(namespaces).filter(_.nonEmpty)
+    Option(NAMESPACES).filter(_.nonEmpty)
       .map(_.map(client.inNamespace))
       .getOrElse(Seq(client.inAnyNamespace()))
       .map(_.pods
@@ -379,7 +484,8 @@ private[utils] class LivyKubernetesClient(
     val driver = pods.find(isDriver)
     val executors = pods.filter(isExecutor)
     val appLog = getApplicationLog(app, cacheLogSize)
-    KubernetesAppReport(driver, executors, appLog)
+    val ingress = getIngress(app)
+    KubernetesAppReport(driver, executors, appLog, ingress, livyConf)
   }
 
   private def getApplicationLog(
@@ -391,6 +497,12 @@ private[utils] class LivyKubernetesClient(
     ).getOrElse(IndexedSeq.empty)
   }
 
+  private def getIngress(app: KubernetesApplication): Option[Ingress] = {
+    client.extensions.ingresses.inNamespace(app.getApplicationNamespace)
+      .withLabel(SPARK_APP_TAG_LABEL, app.getApplicationTag)
+      .list.getItems.asScala.headOption
+  }
+
   private def isDriver: Pod => Boolean = {
     _.getMetadata.getLabels.get(SPARK_ROLE_LABEL) == SPARK_ROLE_DRIVER
   }
@@ -400,6 +512,119 @@ private[utils] class LivyKubernetesClient(
   }
 
   def getDefaultNamespace: String = client.getNamespace
+
+  def createSparkUIIngress(app: KubernetesApplication, livyConf: LivyConf): Unit = {
+    val sparkUIService = buildSparkUIService(app)
+
+    val annotationsString = livyConf.get(LivyConf.KUBERNETES_INGRESS_ADDITIONAL_ANNOTATIONS)
+    var annotations: Seq[(String, String)] = Seq.empty
+    if (annotationsString != null && annotationsString.trim.nonEmpty) {
+      annotations = annotationsString
+        .split(";").map(_.split("="))
+        .map(array => array.head -> array.tail.mkString("=")).toSeq
+    }
+
+    val sparkUIIngress = buildSparkUIIngress(
+      app,
+      livyConf.get(LivyConf.KUBERNETES_INGRESS_PROTOCOL),
+      livyConf.get(LivyConf.KUBERNETES_INGRESS_HOST),
+      sparkUIService,
+      livyConf.get(LivyConf.KUBERNETES_INGRESS_TLS_SECRET_NAME),
+      livyConf.get(LivyConf.KUBERNETES_INGRESS_ADDITIONAL_CONF_SNIPPET),
+      annotations: _*
+    )
+    val resources: Seq[HasMetadata] = Seq(sparkUIService, sparkUIIngress)
+    addOwnerReference(app.getApplicationPod, resources: _*)
+    client.resourceList(resources.asJava).createOrReplace()
+  }
+
+  private def buildSparkUIIngress(
+      app: KubernetesApplication, protocol: String, host: String, service: Service,
+      tlsSecretName: String, additionalConfSnippet: String, additionalAnnotations: (String, String)*
+  ): Ingress = {
+    val appTag = app.getApplicationTag
+
+    val annotations = Map(
+      "kubernetes.io/ingress.class" -> "nginx",
+      "nginx.ingress.kubernetes.io/rewrite-target" -> "/$1",
+      "nginx.ingress.kubernetes.io/proxy-redirect-from" -> s"http://$$host/",
+      "nginx.ingress.kubernetes.io/proxy-redirect-to" -> s"/$appTag/",
+      "nginx.ingress.kubernetes.io/configuration-snippet" ->
+        NGINX_CONFIG_SNIPPET.concat(additionalConfSnippet).format(appTag, appTag, appTag)
+    ) ++ additionalAnnotations
+
+    val builder = new IngressBuilder()
+      .withApiVersion("extensions/v1beta1")
+      .withNewMetadata()
+      .withName(fixResourceName(s"${app.getApplicationPod.getMetadata.getName}-ui"))
+      .withNamespace(app.getApplicationNamespace)
+      .addToAnnotations(annotations.asJava)
+      .addToLabels(SPARK_APP_TAG_LABEL, appTag)
+      .addToLabels(CREATED_BY_LIVY_LABEL.asJava)
+      .endMetadata()
+      .withNewSpec()
+      .addNewRule()
+      .withHost(host)
+      .withNewHttp()
+      .addNewPath()
+      .withPath(s"/$appTag/?(.*)")
+      .withNewBackend()
+      .withServiceName(service.getMetadata.getName)
+      .withNewServicePort(service.getSpec.getPorts.get(0).getName)
+      .endBackend()
+      .endPath()
+      .endHttp()
+      .endRule()
+    if (protocol.endsWith("s") && tlsSecretName != null && tlsSecretName.nonEmpty) {
+      builder.addNewTl().withSecretName(tlsSecretName).addToHosts(host).endTl()
+    }
+    builder.endSpec().build()
+  }
+
+  private def fixResourceName(name: String): String = {
+    StringUtils.stripEnd(StringUtils.left(name, 63), "-").toLowerCase
+  }
+
+  private def buildSparkUIService(
+  app: KubernetesApplication,
+      portName: String = "spark-ui",
+      port: Int = 4040
+  ): Service = {
+    new ServiceBuilder()
+      .withNewMetadata()
+      .withName(fixResourceName(s"${app.getApplicationPod.getMetadata.getName}-ui"))
+      .withNamespace(app.getApplicationNamespace)
+      .addToLabels(SPARK_APP_TAG_LABEL, app.getApplicationTag)
+      .addToLabels(CREATED_BY_LIVY_LABEL.asJava)
+      .endMetadata()
+      .withNewSpec()
+      .withClusterIP("None")
+      .addToSelector(SPARK_APP_TAG_LABEL, app.getApplicationTag)
+      .addToSelector(SPARK_ROLE_LABEL, SPARK_ROLE_DRIVER)
+      .addNewPort()
+      .withName(portName)
+      .withPort(port)
+      .endPort()
+      .endSpec()
+      .build()
+  }
+
+  // Add a OwnerReference to the given resources making the driver pod an owner of them so when
+  // the driver pod is deleted, the resources are garbage collected.
+  private def addOwnerReference(owner: Pod, resources: HasMetadata*): Unit = {
+    val driverPodOwnerReference = new OwnerReferenceBuilder()
+      .withName(owner.getMetadata.getName)
+      .withApiVersion(owner.getApiVersion)
+      .withUid(owner.getMetadata.getUid)
+      .withKind(owner.getKind)
+      .withController(true)
+      .build()
+    resources.foreach {
+      resource =>
+        val originalMetadata = resource.getMetadata
+        originalMetadata.setOwnerReferences(Collections.singletonList(driverPodOwnerReference))
+    }
+  }
 }
 
 private[utils] object KubernetesClientFactory {
@@ -447,7 +672,7 @@ private[utils] object KubernetesClientFactory {
       }
       .build()
     new LivyKubernetesClient(
-      new DefaultKubernetesClient(config), livyConf.getKubernetesNamespaces())
+      new DefaultKubernetesClient(config), livyConf)
   }
 
   private[utils] def sparkMasterToKubernetesApi(sparkMaster: String): String = {

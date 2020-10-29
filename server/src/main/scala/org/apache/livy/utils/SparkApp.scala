@@ -24,12 +24,20 @@ import org.apache.livy.LivyConf
 object AppInfo {
   val DRIVER_LOG_URL_NAME = "driverLogUrl"
   val SPARK_UI_URL_NAME = "sparkUiUrl"
+  val EXECUTORS_LOG_URLS_NAME = "executorLogUrls"
 }
 
-case class AppInfo(var driverLogUrl: Option[String] = None, var sparkUiUrl: Option[String] = None) {
+case class AppInfo(
+  var driverLogUrl: Option[String] = None,
+  var sparkUiUrl: Option[String] = None,
+  var executorLogUrls: Option[String] = None) {
   import AppInfo._
   def asJavaMap: java.util.Map[String, String] =
-    Map(DRIVER_LOG_URL_NAME -> driverLogUrl.orNull, SPARK_UI_URL_NAME -> sparkUiUrl.orNull).asJava
+    Map(
+      DRIVER_LOG_URL_NAME -> driverLogUrl.orNull,
+      SPARK_UI_URL_NAME -> sparkUiUrl.orNull,
+      EXECUTORS_LOG_URLS_NAME -> executorLogUrls.orNull
+    ).asJava
 }
 
 trait SparkAppListener {
@@ -72,7 +80,6 @@ object SparkApp {
         SPARK_YARN_TAG_KEY -> mergedYarnTags,
         "spark.yarn.submit.waitAppCompletion" -> "false")
     } else if (livyConf.isRunningOnKubernetes()) {
-
       // We don't allow to submit applications to the namespaces different from the configured
       val kubernetesNamespaces = livyConf.getKubernetesNamespaces()
       val targetNamespace = sparkConf.getOrElse("spark.kubernetes.namespace",

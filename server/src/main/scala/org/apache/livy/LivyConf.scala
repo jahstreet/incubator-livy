@@ -63,6 +63,7 @@ object LivyConf {
   val SERVER_BASE_PATH = Entry("livy.ui.basePath", "")
 
   val UI_ENABLED = Entry("livy.ui.enabled", true)
+  val UI_HISTORY_SERVER_URL = Entry("livy.ui.history-server-url", "http://spark-history-server")
 
   val REQUEST_HEADER_SIZE = Entry("livy.server.request-header.size", 131072)
   val RESPONSE_HEADER_SIZE = Entry("livy.server.response-header.size", 131072)
@@ -277,6 +278,29 @@ object LivyConf {
   // How often to check livy session leakage.
   val KUBERNETES_APP_LEAKAGE_CHECK_INTERVAL =
     Entry("livy.server.kubernetes.app-leakage.check-interval", "60s")
+
+  // Whether to create Kubernetes Nginx Ingress for Spark UI.
+  val KUBERNETES_INGRESS_CREATE = Entry("livy.server.kubernetes.ingress.create", false)
+  // Kubernetes Nginx Ingress protocol.
+  val KUBERNETES_INGRESS_PROTOCOL = Entry("livy.server.kubernetes.ingress.protocol", "http")
+  // Kubernetes Nginx Ingress host.
+  val KUBERNETES_INGRESS_HOST = Entry("livy.server.kubernetes.ingress.host", "localhost")
+  // Kubernetes Nginx Ingress additional configuration snippet.
+  val KUBERNETES_INGRESS_ADDITIONAL_CONF_SNIPPET =
+    Entry("livy.server.kubernetes.ingress.additionalConfSnippet", "")
+  // Kubernetes Nginx Ingress additional annotations: key1=value1;key2=value2;... .
+  val KUBERNETES_INGRESS_ADDITIONAL_ANNOTATIONS =
+    Entry("livy.server.kubernetes.ingress.additionalAnnotations", "")
+  // Kubernetes secret name for Nginx Ingress TLS.
+  // Is omitted if 'livy.server.kubernetes.ingress.protocol' value doesn't end with 's'
+  val KUBERNETES_INGRESS_TLS_SECRET_NAME =
+  Entry("livy.server.kubernetes.ingress.tls.secretName", "spark-cluster-tls")
+
+  val KUBERNETES_GRAFANA_LOKI_ENABLED = Entry("livy.server.kubernetes.grafana.loki.enabled", false)
+  val KUBERNETES_GRAFANA_URL = Entry("livy.server.kubernetes.grafana.url", "http://localhost:3000")
+  val KUBERNETES_GRAFANA_LOKI_DATASOURCE =
+    Entry("livy.server.kubernetes.grafana.loki.datasource", "loki")
+  val KUBERNETES_GRAFANA_TIME_RANGE = Entry("livy.server.kubernetes.grafana.timeRange", "6h")
 
   // Whether session timeout should be checked, by default it will be checked, which means inactive
   // session will be stopped after "livy.server.session.timeout"
